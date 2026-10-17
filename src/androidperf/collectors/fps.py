@@ -16,12 +16,12 @@ import re
 from adbutils import AdbDevice
 
 _PATTERNS = {
-    "frames_total": re.compile(r"Total frames rendered:\s*(\d+)"),
-    "jank_frames": re.compile(r"Janky frames:\s*(\d+)\s*\(([\d.]+)%\)"),
-    "p50_ms": re.compile(r"^50th percentile:\s*(\d+)ms", re.MULTILINE),
-    "p90_ms": re.compile(r"^90th percentile:\s*(\d+)ms", re.MULTILINE),
-    "p95_ms": re.compile(r"^95th percentile:\s*(\d+)ms", re.MULTILINE),
-    "p99_ms": re.compile(r"^99th percentile:\s*(\d+)ms", re.MULTILINE),
+    "frames_total": re.compile(r"^[ \t]*Total frames rendered:[ \t]*(\d+)[ \t]*$", re.MULTILINE),
+    "jank_frames": re.compile(r"^[ \t]*Janky frames:[ \t]*(\d+)(?:[ \t]*\(([\d.]+)%\))?[ \t]*$", re.MULTILINE),
+    "p50_ms": re.compile(r"^[ \t]*50th percentile:[ \t]*(\d+)ms[ \t]*$", re.MULTILINE),
+    "p90_ms": re.compile(r"^[ \t]*90th percentile:[ \t]*(\d+)ms[ \t]*$", re.MULTILINE),
+    "p95_ms": re.compile(r"^[ \t]*95th percentile:[ \t]*(\d+)ms[ \t]*$", re.MULTILINE),
+    "p99_ms": re.compile(r"^[ \t]*99th percentile:[ \t]*(\d+)ms[ \t]*$", re.MULTILINE),
 }
 _UPTIME_MS_RE = re.compile(r"Uptime:\s*(\d+)")
 _STATS_SINCE_NS_RE = re.compile(r"Stats since:\s*(\d+)ns")
@@ -38,7 +38,7 @@ def parse_gfxinfo(output: str) -> dict[str, float]:
             continue
         if key == "jank_frames":
             result["jank_frames"] = float(match.group(1))
-            with contextlib.suppress(ValueError):
+            with contextlib.suppress(ValueError, TypeError):
                 result["jank_pct"] = float(match.group(2))
         else:
             with contextlib.suppress(ValueError):
@@ -67,7 +67,10 @@ def parse_gfxinfo(output: str) -> dict[str, float]:
 
 
 def reset(device: AdbDevice, package: str) -> None:
-    device.shell(f"dumpsys gfxinfo {package} reset")
+    if isinstance(getattr(device, "command", None), list):
+        device.shell("dumpsys", "gfxinfo", package, "reset")
+    else:
+        device.shell(f"dumpsys gfxinfo {package} reset")
 
 
 def sample(device: AdbDevice, *, package: str, **_: object) -> dict[str, float]:
@@ -83,3 +86,23 @@ def sample(device: AdbDevice, *, package: str, **_: object) -> dict[str, float]:
     else:
         parsed["fps"] = 0.0
     return parsed
+
+
+def frame_values(text):
+    """共享解析算法，输出Case既有字段；零帧不返回伪百分位。"""
+    parsed = parse_gfxinfo(text)
+    mapping = {"frames_total": "frames", "jank_frames": "janky_frames", "p50_ms": "p50_ms", "p95_ms": "p95_ms"}
+    result = {target: int(parsed[source]) for source, target in mapping.items() if source in parsed}
+    if result.get("frames") and "janky_frames" in result:
+        result["jank_rate"] = result["janky_frames"] / result["frames"]
+    return result
+
+
+def read_window(device, package, *, framestats=False):
+    """外部窗口只读，不触发reset；调用方明确控制每轮边界。"""
+    args = ["dumpsys", "gfxinfo", package]
+    if framestats:
+        args.append("framestats")
+    if isinstance(getattr(device, "command", None), list):
+        return device.shell(*args)
+    return device.shell(" ".join(args))

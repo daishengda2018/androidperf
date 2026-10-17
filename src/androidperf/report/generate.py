@@ -6,6 +6,7 @@ external network calls needed to view the report.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from hashlib import md5
 from pathlib import Path
@@ -14,8 +15,7 @@ from typing import Any
 import pandas as pd
 import plotly.graph_objects as go
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-import dataclasses
+from plotly.offline import get_plotlyjs
 
 from ..collectors.activity import class_short_name
 from ..insights import analyze as analyze_insights
@@ -32,6 +32,7 @@ _PALETTE = [
 def _color_for(name: str) -> str:
     h = int(md5(name.encode("utf-8")).hexdigest()[:8], 16)
     return _PALETTE[h % len(_PALETTE)]
+
 
 _TEMPLATE_DIR = Path(__file__).parent
 _TEMPLATE_NAME = "template.html.j2"
@@ -170,21 +171,78 @@ def _cpu_figure(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def _memory_figure(df: pd.DataFrame) -> go.Figure:
+def _memory_figure(df: pd.DataFrame, *, alloc=False) -> go.Figure:
+    """两种口径独立成图，缺失值断线；阶段线只表示实际采样时刻。"""
+    import re
+
     fig = go.Figure()
     traces = (
-        ("pss_kb", "Total PSS"),
-        ("java_kb", "Java"),
-        ("native_kb", "Native"),
-        ("gfx_kb", "Graphics"),
+        (("native_alloc_kb", "Native Alloc"), ("runtime_alloc_kb", "Runtime Alloc"))
+        if alloc
+        else (
+            ("pss_kb", "Total PSS"),
+            ("java_kb", "Java"),
+            ("native_kb", "Native"),
+            ("gfx_kb", "Graphics"),
+        )
     )
     for key, label in traces:
-        if key in df.columns:
+        if key in df.columns and df[key].notna().any():
             fig.add_trace(
-                go.Scatter(x=df["t"], y=df[key] / 1024.0, name=label, mode="lines")
+                go.Scatter(
+                    x=df["t"],
+                    y=df[key] / 1024.0,
+                    name=label,
+                    mode="markers" if df[key].notna().sum() == 1 else "lines",
+                    connectgaps=False,
+                    hovertemplate="%{y:.2f} MiB<extra>%{fullData.name}</extra>",
+                )
             )
-    fig.update_layout(**_layout("MB"))
+    fig.update_layout(**_layout("MiB"))
+    # 为轴刻度和阶段文字留出空间，避免挤在绘图区边缘。
+    fig.update_layout(
+        height=440,
+        margin={"l": 85, "r": 30, "t": 65, "b": 100},
+        hoverlabel={"namelength": -1, "font": {"size": 12}},
+        legend={"font": {"size": 12}, "y": -0.24},
+    )
+    fig.update_yaxes(automargin=True, title_standoff=22, ticks="outside", ticklen=6, ticklabelstandoff=8, nticks=5)
+    fig.update_xaxes(automargin=True, ticks="outside", ticklen=6, ticklabelstandoff=6)
+
+    # 每轮加载前只标记最后一个有效样本，与baseline取值一致；不丢掉后续轮次。
+    boundaries = []
+    before = None
+    for _, row in df.sort_values("t").iterrows():
+        phase = str(row.get("phase", ""))
+        if re.fullmatch(r"before_load(?:_\d+)?", phase):
+            if pd.notna(row["t"]) and any(pd.notna(row.get(key)) for key, _ in traces):
+                before = row["t"]
+            continue
+        if before is not None:
+            boundaries.append((before, "加载前采样"))
+            before = None
+        if phase in ("exit_0s", "exit_0") and pd.notna(row["t"]):
+            boundaries.append((row["t"], "退出后首样"))
+    if before is not None:
+        boundaries.append((before, "加载前采样"))
+    for at, label in boundaries:
+        fig.add_vline(
+            x=at,
+            line_dash="dash",
+            line_color="#94a3b8",
+            annotation_text=label,
+            annotation_position="top right",
+            annotation_yanchor="bottom",
+            annotation_yshift=12,
+            annotation_font_size=12,
+        )
+    if not fig.data:
+        fig.add_annotation(text="未采集", x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False)
     return fig
+
+
+def _alloc_figure(df: pd.DataFrame) -> go.Figure:
+    return _memory_figure(df, alloc=True)
 
 
 def _network_figure(df: pd.DataFrame) -> go.Figure:
@@ -287,8 +345,6 @@ def _thermal_figure(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-
-
 def generate_report(
     samples_json: Path,
     output_html: Path,
@@ -304,6 +360,14 @@ def generate_report(
             heap_histogram = json.loads(hist_path.read_text()).get("histogram", [])
         else:
             heap_histogram = []
+    output_html = Path(output_html)
+    output_html.write_text(render_payload(payload, heap_histogram=heap_histogram))
+    return output_html
+
+
+def render_payload(payload, *, heap_histogram=None, extension_content="", include_metric_charts=True):
+    """通用图表与专项区共用一个模板；专项HTML必须由工具自身转义生成。"""
+    heap_histogram = heap_histogram or []
     samples = payload.get("samples", [])
     events = payload.get("events", [])
     gc_events = payload.get("gc_events", [])
@@ -311,8 +375,11 @@ def generate_report(
     meta = payload.get("meta", {})
 
     findings = analyze_insights(
-        samples=samples, events=events, meta=meta,
-        gc_events=gc_events, thread_dumps=thread_dumps,
+        samples=samples,
+        events=events,
+        meta=meta,
+        gc_events=gc_events,
+        thread_dumps=thread_dumps,
     )
     findings_dicts = [dataclasses.asdict(f) for f in findings]
 
@@ -326,14 +393,32 @@ def generate_report(
     timeline = _timeline_figure(events, duration)
     if timeline is not None:
         charts.append({"title": "Screen timeline", "fig": timeline})
-    charts.extend([
-        {"title": "CPU", "fig": _cpu_figure(df)},
-        {"title": "Memory", "fig": _memory_figure(df)},
-        {"title": "Network", "fig": _network_figure(df)},
-        {"title": "Render activity (frames/sec) & jank", "fig": _fps_figure(df)},
-        {"title": "Battery", "fig": _battery_figure(df)},
-        {"title": "Thermal", "fig": _thermal_figure(df)},
-    ])
+    for title, builder, keys in (
+        ("CPU", _cpu_figure, ("cpu_pct",)),
+        ("Memory · App Summary / PSS", _memory_figure, ("pss_kb", "java_kb", "native_kb", "gfx_kb")),
+        ("Memory · Heap Alloc", _alloc_figure, ("t",)),
+        ("Network", _network_figure, ("rx_b", "tx_b")),
+        ("Render activity (frames/sec) & jank", _fps_figure, ("fps", "jank_pct")),
+        ("Battery", _battery_figure, ("battery_level_pct", "battery_temp_c")),
+        ("Thermal", _thermal_figure, ("thermal_skin_c", "thermal_cpu_c", "thermal_status")),
+    ):
+        if any(key in df.columns for key in keys):
+            charts.append({"title": title, "fig": builder(df)})
+    missing_channels = [
+        label
+        for label, keys in (
+            ("CPU", ("cpu_pct",)),
+            ("Memory", ("pss_kb", "native_alloc_kb")),
+            ("Network", ("rx_b", "tx_b")),
+            ("Frames/sec", ("fps",)),
+            ("Battery", ("battery_level_pct",)),
+            ("Thermal", ("thermal_skin_c", "thermal_status")),
+        )
+        if not any(key in df.columns for key in keys)
+    ]
+
+    if meta.get("case_report"):
+        missing_channels = []
 
     # Tooltip enrichment: fold the active activity/fragment at each timestamp
     # into every metric chart's unified hover. The swim-lane on top carries
@@ -342,6 +427,9 @@ def generate_report(
         if chart["title"] == "Screen timeline":
             continue
         _add_context_hover(chart["fig"], df, events, duration)
+
+    if not include_metric_charts:
+        charts = []
 
     rendered_charts: list[dict[str, str]] = []
     for i, chart in enumerate(charts):
@@ -367,8 +455,9 @@ def generate_report(
         events=events,
         findings=findings_dicts,
         heap_histogram=heap_histogram[:100],
+        extension_content=extension_content,
+        plotly_bundle=("<script>" + get_plotlyjs() + "</script>") if "plotly-graph-div" in extension_content else "",
+        missing_channels=missing_channels,
     )
 
-    output_html = Path(output_html)
-    output_html.write_text(out)
-    return output_html
+    return out

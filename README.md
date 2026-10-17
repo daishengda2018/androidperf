@@ -22,13 +22,13 @@ self-contained HTML report at the end, and automatically surfaces plain-English
 
 ## Requirements
 
-| | |
-|---|---|
-| **Python** | 3.11 or newer |
-| **adb** | Android Platform Tools on `$PATH`. macOS: `brew install --cask android-platform-tools`. Debian/Ubuntu: `sudo apt install adb`. Windows/other: <https://developer.android.com/tools/releases/platform-tools>. Verify with `adb version`. |
-| **Android device** | Physical device or emulator running **Android 7.0 (SDK 24) or newer** — `dumpsys gfxinfo framestats` needs SDK 24+. |
-| **USB debugging** | Enabled in Developer Options, and the host authorized (`adb devices` shows the serial as `device`, not `unauthorized`). |
-| **Python deps** | Installed automatically: `adbutils`, `typer`, `rich`, `jinja2`, `plotly`, `pandas`, `fastapi`, `uvicorn`. |
+|                          |                                                                                                                                                                                                                                                                                                             |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Python**         | 3.11 or newer                                                                                                                                                                                                                                                                                               |
+| **adb**            | Android Platform Tools on `$PATH`. macOS: `brew install --cask android-platform-tools`. Debian/Ubuntu: `sudo apt install adb`. Windows/other: [https://developer.android.com/tools/releases/platform-tools](https://developer.android.com/tools/releases/platform-tools). Verify with `adb version`. |
+| **Android device** | Physical device or emulator running **Android 7.0 (SDK 24) or newer** — `dumpsys gfxinfo framestats` needs SDK 24+.                                                                                                                                                                                |
+| **USB debugging**  | Enabled in Developer Options, and the host authorized (`adb devices` shows the serial as `device`, not `unauthorized`).                                                                                                                                                                               |
+| **Python deps**    | Installed automatically: `adbutils`, `typer`, `rich`, `jinja2`, `plotly`, `pandas`, `fastapi`, `uvicorn`.                                                                                                                                                                                   |
 
 `adb` is **not** a Python package — it's a standalone binary. If `androidperf devices` says "command not found", that's the missing piece.
 
@@ -45,7 +45,6 @@ From source:
 ```bash
 git clone https://github.com/jitinsharma/androidperf.git
 cd androidperf
-
 # Option A — globally available, isolated venv managed by pipx:
 pipx install .
 pipx install --editable .          # if you plan to edit the code
@@ -53,6 +52,16 @@ pipx install --editable .          # if you plan to edit the code
 # Option B — a regular venv with the dev extras (pytest, ruff):
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
+```
+better choose : use uv to manager package
+```bash
+# Option A — globally available, isolated venv managed by uv (pipx alternative):
+uv tool install .
+uv tool install . --editable .       # if you plan to edit the code
+
+# Option B — a regular venv with the dev extras (pytest, ruff):
+# (uv will automatically create the .venv and install the project as editable)
+uv sync --all-groups
 ```
 
 ## Quickstart
@@ -96,21 +105,21 @@ Each run writes to `runs/<timestamp>-<pkg>/`:
 
 ## What gets measured
 
-| Metric | Source |
-|---|---|
-| CPU % (per-core summed) | `top -n 1 -b -p <pid>` |
-| RAM: PSS / Java / Native / Graphics / Code / Stack | `dumpsys meminfo <package>` |
-| Object counts: Activities, Views, AppContexts | `dumpsys meminfo <package>` |
-| Network rx/tx (per-tick deltas) | `/proc/net/xt_qtaguid/stats` → `dumpsys netstats` on Android 10+ |
-| Frame rendering rate, jank %, frame p50/p90/p95/p99 | `dumpsys gfxinfo <package>` |
-| Battery: level, temp, voltage, status | `dumpsys battery` |
-| Thermal: status, skin/cpu/gpu/battery °C | `dumpsys thermalservice` |
-| Thread count (per-process, instantaneous) | `/proc/<pid>/status` |
-| Thread names (library attribution) | `/proc/<pid>/task/*/status` |
-| Context switches, disk I/O (per-tick deltas) | `/proc/<pid>/io` |
-| GC events: reason, freed KB, timestamp | `logcat -s art` (background tail) |
-| Activity transitions | `dumpsys activity activities` |
-| Active fragment (top-level + deepest visible child) | `dumpsys activity <component>` — AndroidX FragmentManager apps only |
+| Metric                                                  | Source                                                                  |
+| ------------------------------------------------------- | ----------------------------------------------------------------------- |
+| CPU % (per-core summed)                                 | `top -n 1 -b -p <pid>`                                                |
+| RAM: PSS / Java / Native / Graphics / Code / Stack      | `dumpsys meminfo <package>`                                           |
+| Object counts: Activities, Views, AppContexts           | `dumpsys meminfo <package>`                                           |
+| Network rx/tx (per-tick deltas)                         | `/proc/net/xt_qtaguid/stats` → `dumpsys netstats` on Android 10+   |
+| Frame rendering rate, jank %, frame p50/p90/p95/p99     | `dumpsys gfxinfo <package>`                                           |
+| Battery: level, temp, voltage, status                   | `dumpsys battery`                                                     |
+| Thermal: status, skin/cpu/gpu/battery °C               | `dumpsys thermalservice`                                              |
+| Thread count (per-process, instantaneous)               | `/proc/<pid>/status`                                                  |
+| Thread names (library attribution)                      | `/proc/<pid>/task/*/status`                                           |
+| Context switches, disk I/O (per-tick deltas)            | `/proc/<pid>/io`                                                      |
+| GC events: reason, freed KB, timestamp                  | `logcat -s art` (background tail)                                     |
+| Activity transitions                                    | `dumpsys activity activities`                                         |
+| Active fragment (top-level + deepest visible child)     | `dumpsys activity <component>` — AndroidX FragmentManager apps only  |
 | Heap histogram: class → instance count + shallow bytes | `am dumpheap` + built-in hprof parser (debug builds / emulators only) |
 
 CPU is reported as `top`'s raw `%CPU` — i.e., summed across cores. 200% means
@@ -129,13 +138,13 @@ time-series and surfaces findings with plain-English descriptions. Findings
 appear as severity-coloured cards in the HTML report and in the web UI done
 panel.
 
-| Category | What's detected |
-|---|---|
-| **memory** | Rapid Java heap growth (linear regression), GC-correlated jank, allocation-pressure GCs, `Explicit` / `NativeAlloc` GCs, Activity leak (obj count never decreasing), excessive View counts |
-| **cpu** | Sustained high CPU (>70% in >30% of ticks), thermal throttle jank, network-driven CPU spikes |
-| **jank** | Chronic jank (>10% mean over rendering ticks), disk-write jank correlation |
-| **threads** | Thread count growth / leak (with activity + library attribution), thread storm >100 concurrent |
-| **network** | Chatty network (>80% ticks with traffic), large payload spikes (>1 MB) |
+| Category          | What's detected                                                                                                                                                                                |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **memory**  | Rapid Java heap growth (linear regression), GC-correlated jank, allocation-pressure GCs, `Explicit` / `NativeAlloc` GCs, Activity leak (obj count never decreasing), excessive View counts |
+| **cpu**     | Sustained high CPU (>70% in >30% of ticks), thermal throttle jank, network-driven CPU spikes                                                                                                   |
+| **jank**    | Chronic jank (>10% mean over rendering ticks), disk-write jank correlation                                                                                                                     |
+| **threads** | Thread count growth / leak (with activity + library attribution), thread storm >100 concurrent                                                                                                 |
+| **network** | Chatty network (>80% ticks with traffic), large payload spikes (>1 MB)                                                                                                                         |
 
 Thread findings include library attribution from thread names — e.g.
 "+12 threads during [NetworkFragment]: OkHttp (8), arch_disk_io (4)" — by
@@ -182,27 +191,27 @@ Past runs are listed in the sidebar.
 
 REST + WebSocket API:
 
-| Endpoint | Description |
-|---|---|
-| `GET /api/devices` | List connected ADB devices |
-| `GET /api/packages?serial=S&filter=F` | List installed packages |
-| `GET /api/runs` | List past runs |
-| `GET /api/runs/{id}/report` | Serve the pre-generated HTML report |
-| `GET /api/runs/{id}/samples` | Raw samples.json payload |
-| `GET /api/runs/{id}/insights` | Insights findings as JSON |
-| `GET /api/runs/{id}/heap` | Heap histogram as JSON |
-| `WS  /ws/record` | Start / stream / stop a live recording |
+| Endpoint                                | Description                            |
+| --------------------------------------- | -------------------------------------- |
+| `GET /api/devices`                    | List connected ADB devices             |
+| `GET /api/packages?serial=S&filter=F` | List installed packages                |
+| `GET /api/runs`                       | List past runs                         |
+| `GET /api/runs/{id}/report`           | Serve the pre-generated HTML report    |
+| `GET /api/runs/{id}/samples`          | Raw samples.json payload               |
+| `GET /api/runs/{id}/insights`         | Insights findings as JSON              |
+| `GET /api/runs/{id}/heap`             | Heap histogram as JSON                 |
+| `WS  /ws/record`                      | Start / stream / stop a live recording |
 
 ## Commands
 
-| Command | Purpose |
-|---|---|
-| `androidperf devices` | List connected ADB devices. |
-| `androidperf packages [--filter X] [--serial S] [--limit N]` | List installed packages. |
-| `androidperf record --package PKG [...]` | Record a session; write JSON + HTML. |
-| `androidperf report SAMPLES_JSON` | Regenerate HTML from an existing run. |
-| `androidperf ui [--port N] [--runs-dir DIR]` | Launch the web UI. |
-| `androidperf version` | Print installed version. |
+| Command                                                        | Purpose                               |
+| -------------------------------------------------------------- | ------------------------------------- |
+| `androidperf devices`                                        | List connected ADB devices.           |
+| `androidperf packages [--filter X] [--serial S] [--limit N]` | List installed packages.              |
+| `androidperf record --package PKG [...]`                     | Record a session; write JSON + HTML.  |
+| `androidperf report SAMPLES_JSON`                            | Regenerate HTML from an existing run. |
+| `androidperf ui [--port N] [--runs-dir DIR]`                 | Launch the web UI.                    |
+| `androidperf version`                                        | Print installed version.              |
 
 ## Development
 
@@ -245,3 +254,22 @@ See [`plan/`](./plan) for architecture and future-direction docs.
 ## License
 
 MIT.
+
+## Reproducible uv environment
+
+This repository owns its Python environment. After cloning or initializing the submodule, run:
+
+```bash
+uv sync --locked
+uv run --locked --no-sync python -m androidperf.automation --help
+```
+
+`.python-version` selects Python 3.11; `pyproject.toml` declares the package and dependencies, and `uv.lock` pins their resolution. uv creates the ignored `.venv/` inside this checkout. Each standalone checkout and submodule has its own environment. Run `uv sync --locked --extra dev` before `uv run --locked --no-sync pytest` when developing. Do not commit `.venv/`; it can be rebuilt from the tracked configuration. Runtime artifacts belong to the caller and must be archived before cleanup.
+
+## Embedded collection and report extensions
+
+External applications can drive `androidperf.capture.CaptureSession` directly with an explicit package name and their own operation scheduler. One complete meminfo supplies App Summary and Heap Alloc; raw output is retained. Use `collectors.fps.reset` and `read_window` for caller-owned frame windows. Periodic collection does not reset those windows. Ordinary recording retains its existing behavior.
+
+`androidperf.report.generate.render_payload(payload, extension_content=html, include_metric_charts=False)` embeds caller-generated HTML into one self-contained report. The caller owns escaping and validating that HTML. Generic charts and templates remain here; application workflows, protocols, identifiers, material URLs, and their tests belong to the calling repository. Do not copy application source into tool fixtures.
+
+CPU keeps the original top percentage. App Summary and Heap Alloc remain separate; PID changes, interruption, missing required metrics, and persistence failures retain incomplete status and available originals. Offline tests do not validate device accuracy or collection overhead.

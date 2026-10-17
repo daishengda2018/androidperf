@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import shlex
+import subprocess
 import time
 from dataclasses import dataclass
 
@@ -146,3 +148,48 @@ def launch_app(
             return pid, uid
         time.sleep(poll_interval)
     raise DeviceError(f"Timed out waiting for {package} to start (waited {wait_seconds:.0f}s).")
+
+
+# 外部实验需要逐条记录ADB操作，普通TUI仍使用adbutils连接。
+
+
+def select_serial(adb, requested=None):
+    """只接受已授权设备；未指定序列号时要求恰好一台，避免误操作其他手机。"""
+    result = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=30, check=True)
+    devices = [line.split()[0] for line in result.stdout.splitlines()[1:] if len(line.split()) == 2 and line.split()[1] == "device"]
+    if requested:
+        if requested not in devices:
+            raise RuntimeError("指定设备未连接或未授权：" + requested)
+        return requested
+    if len(devices) != 1:
+        raise RuntimeError("需要恰好一个已授权设备，当前：" + repr(devices) + "；多设备请使用--serial")
+    return devices[0]
+
+
+class RecordedDevice:
+    """封装有超时和操作记录的 ADB 调用；负责执行，不决定 Case 的业务顺序。"""
+
+    def __init__(self, adb, serial, output):
+        self.command = [adb, "-s", serial]
+        self.output = output
+        self.actions = []
+        self.started = time.monotonic()
+
+    def call(self, *args, binary=False):
+        start = time.monotonic()
+        result = subprocess.run(self.command + list(args), capture_output=True, timeout=30)
+        self.actions.append(
+            {
+                "at_s": start - self.started,
+                "duration_s": time.monotonic() - start,
+                "args": list(args),
+                "returncode": result.returncode,
+            }
+        )
+        if result.returncode:
+            raise RuntimeError("adb失败：" + result.stderr.decode(errors="replace"))
+        return result.stdout if binary else result.stdout.decode(errors="replace").strip()
+
+    def shell(self, *args):
+        # adb会把shell参数重新拼接；显式引用可保留空属性值及带空格文本。
+        return self.call("shell", shlex.join(args))

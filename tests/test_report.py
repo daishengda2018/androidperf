@@ -60,3 +60,18 @@ def test_generate_report_handles_empty_samples(tmp_path: Path):
 
     result = generate_report(json_path, html_path)
     assert result.exists()
+
+
+def test_external_report_content_uses_shared_template_without_duplicate_charts():
+    from androidperf.report.generate import _memory_figure, render_payload
+    import pandas as pd
+
+    payload = _synthetic_payload(2)
+    external = '<section><h2>Example workflow</h2>' + _memory_figure(
+        pd.DataFrame(payload["samples"])
+    ).to_html(full_html=False, include_plotlyjs=False) + '</section>'
+    html = render_payload(payload, extension_content=external, include_metric_charts=False)
+    assert 'Example workflow' in html
+    assert 'plotly.js' in html
+    assert 'class="chart"' not in html
+    assert html.index('class="summary"') < html.index('Example workflow')

@@ -86,3 +86,56 @@ def sample_objects(device: AdbDevice, *, package: str, **_: object) -> dict[str,
     # No -s flag so the Objects block is present; grep keeps it fast.
     out = device.shell(f"dumpsys meminfo {package} | grep -A10 '^ Objects'")
     return parse_meminfo_objects(out)
+
+
+def memory_values(text):
+    """按表头读取 Heap Alloc 和 Graphics/Total PSS，统一转换为 MiB；缺字段不填零。"""
+    result = {}
+    # RSS会使Heap列右移；按第二行表头定位Alloc，不把Size当作已分配内存。
+    header = re.search(r"^[ \t]*Total[ \t]+Dirty[^\n]*[ \t]+Size[ \t]+Alloc[ \t]+Free[ \t]*$", text, re.MULTILINE)
+    columns = header.group().split() if header else None
+    for label, key, index in (
+        ("Native Heap", "Native Alloc", None),
+        ("Dalvik Heap", "Runtime Alloc", None),
+        ("Graphics", "Graphics PSS", 0),
+    ):
+        match = re.search(r"^[ \t]*" + label + r"[ \t]+(\d+(?:[ \t]+\d+)*)[ \t]*$", text, re.MULTILINE)
+        if match:
+            numbers = match[1].split()
+            if index is None:
+                if columns:
+                    if len(numbers) != len(columns):
+                        continue
+                    index = columns.index("Alloc")
+                elif len(numbers) in (7, 8):
+                    # 兼容只保留数据行的旧产物；仅接受已知布局，末三列是Size/Alloc/Free。
+                    index = len(numbers) - 2
+                else:
+                    continue
+            if len(numbers) > index:
+                result[key] = int(numbers[index]) / 1024
+    if "Graphics PSS" not in result:
+        match = re.search(r"^\s*Graphics:\s*(\d+)", text, re.MULTILINE)
+        if match:
+            result["Graphics PSS"] = int(match[1]) / 1024
+    # 优先App Summary中的TOTAL PSS，兼容旧版TOTAL表格。
+    match = re.search(r"TOTAL PSS:\s*(\d+)", text)
+    if not match:
+        match = re.search(r"^\s*TOTAL\s+(\d+)", text, re.MULTILINE)
+    if match:
+        result["Total PSS"] = int(match[1]) / 1024
+    return result
+
+
+def capture_meminfo(device, package, root, result, phase, started):
+    """同一份原件解析PSS及Alloc，保留时间与阶段用于重建。"""
+    import time
+
+    text = device.shell("dumpsys", "meminfo", package)
+    if "No process found" in text:
+        raise RuntimeError("meminfo未找到实验进程")
+    samples = result.setdefault("meminfo_samples", [])
+    name = f"meminfo-{len(samples):04d}.txt"
+    (root / name).write_text(text)
+    samples.append({"file": name, "phase": phase, "at_s": started - device.started, "duration_s": time.monotonic() - started})
+    return text
